@@ -19,14 +19,20 @@ def _detect_compute_dtype():
     if env is not None:
         return _DTYPE_MAP[env], f"set via NANOCHAT_DTYPE={env}"
     if torch.cuda.is_available():
-        # bf16 requires SM 80+ (Ampere: A100, A10, etc.)
-        # Older GPUs like V100 (SM 70) and T4 (SM 75) only have fp16 tensor cores
         capability = torch.cuda.get_device_capability()
-        if capability >= (8, 0):
-            return torch.bfloat16, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (bf16 supported)"
+        major, minor = capability
+        # bf16 supported on:
+        #   NVIDIA Ampere+ (SM 80+)
+        #   AMD CDNA (gfx908+, reports as SM 8.0+)
+        #   AMD RDNA 2+ (gfx1030+, reports as SM 10.3+)
+        is_rdna = major >= 10  # RDNA 2 (gfx1030) reports capability (10, 3)
+        is_ampere_plus = capability >= (8, 0)
+        if is_rdna or is_ampere_plus:
+            arch = f"RDNA gfx{major}{minor}" if is_rdna else f"SM {major}{minor}"
+            return torch.bfloat16, f"auto-detected: {arch} (bf16 supported)"
         # fp16 training requires GradScaler (not yet implemented), so fall back to fp32.
         # Users can still force fp16 via NANOCHAT_DTYPE=float16 if they know what they're doing.
-        return torch.float32, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (pre-Ampere, bf16 not supported, using fp32)"
+        return torch.float32, f"auto-detected: CUDA SM {major}{minor} (pre-Ampere, bf16 not supported, using fp32)"
     return torch.float32, "auto-detected: no CUDA (CPU/MPS)"
 COMPUTE_DTYPE, COMPUTE_DTYPE_REASON = _detect_compute_dtype()
 
@@ -264,6 +270,17 @@ def get_peak_flops(device_name: str) -> float:
         (["5090"], 209.5e12),
         (["4090"], 165.2e12),
         (["3090"], 71e12),
+        # AMD RDNA 3 (gfx1100/gfx1101/gfx1102)
+        (["7900 xtx"], 122.8e12),
+        (["7900 xt"], 103.0e12),
+        (["7800 xt"], 74.7e12),
+        (["7700 xt"], 43.0e12),
+        # AMD RDNA 2 (gfx1030/gfx1031)
+        (["6950 xt"], 47.3e12),
+        (["6900 xt"], 46.1e12),
+        (["6800 xt"], 31.5e12),
+        (["6800"], 23.2e12),
+        (["6700 xt"], 18.8e12),
     )
     for patterns, flops in _PEAK_FLOPS_TABLE:
         if all(p in name for p in patterns):

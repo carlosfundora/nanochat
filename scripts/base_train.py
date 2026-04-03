@@ -44,7 +44,7 @@ parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('d
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
-parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao)")
+parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires Hopper/Blackwell or CDNA3 GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
@@ -112,8 +112,8 @@ else:
         print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback")
     print0("WARNING: Training will be less efficient without FA3")
     if args.window_pattern != "L":
-        print0(f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Your GPU utilization will be terrible.")
-        print0("WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.")
+        print0(f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Forcing --window-pattern L.")
+        args.window_pattern = "L"
     print0("!" * 80)
 
 # -----------------------------------------------------------------------------
@@ -168,28 +168,35 @@ if resuming:
 if args.fp8:
     if device_type != "cuda":
         print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
+        args.fp8 = False
     else:
-        # our custom fp8 is simpler than torchao, written for exact API compatibility
-        from nanochat.fp8 import Float8LinearConfig, convert_to_float8_training
-        # from torchao.float8 import Float8LinearConfig, convert_to_float8_training
-        import torch.nn as nn
+        from nanochat.fp8 import fp8_supported
+        if not fp8_supported():
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"
+            print0(f"Warning: FP8 not supported on {gpu_name} (requires Hopper/Blackwell or CDNA3). Ignoring --fp8 flag")
+            args.fp8 = False
+        else:
+            # our custom fp8 is simpler than torchao, written for exact API compatibility
+            from nanochat.fp8 import Float8LinearConfig, convert_to_float8_training
+            # from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+            import torch.nn as nn
 
-        # Filter: dims must be divisible by 16 (FP8 hardware requirement) large enough
-        def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
-            if not isinstance(mod, nn.Linear):
-                return False
-            if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
-                return False
-            if min(mod.in_features, mod.out_features) < 128:
-                return False
-            return True
+            # Filter: dims must be divisible by 16 (FP8 hardware requirement) large enough
+            def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
+                if not isinstance(mod, nn.Linear):
+                    return False
+                if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
+                    return False
+                if min(mod.in_features, mod.out_features) < 128:
+                    return False
+                return True
 
-        fp8_config = Float8LinearConfig.from_recipe_name(args.fp8_recipe)
-        num_linear = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
-        convert_to_float8_training(model, config=fp8_config, module_filter_fn=fp8_module_filter)
-        num_fp8 = sum(1 for m in model.modules() if 'Float8' in type(m).__name__)
-        num_skipped = num_linear - num_fp8
-        print0(f"✓ FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8}/{num_linear} linear layers, skipped {num_skipped} (too small)")
+            fp8_config = Float8LinearConfig.from_recipe_name(args.fp8_recipe)
+            num_linear = sum(1 for m in model.modules() if isinstance(m, nn.Linear))
+            convert_to_float8_training(model, config=fp8_config, module_filter_fn=fp8_module_filter)
+            num_fp8 = sum(1 for m in model.modules() if 'Float8' in type(m).__name__)
+            num_skipped = num_linear - num_fp8
+            print0(f"✓ FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8}/{num_linear} linear layers, skipped {num_skipped} (too small)")
 
 # Context manager to temporarily disable FP8 so that model evaluation remains in BF16
 @contextmanager

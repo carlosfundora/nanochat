@@ -21,6 +21,17 @@ FP8 training wraps each of these three matmuls with:
 The key insight: torch._scaled_mm and the float8 dtypes are PyTorch built-ins.
 torchao is just orchestration around these primitives. We can call them directly.
 
+Hardware requirements
+=====================
+FP8 tensor cores are only available on:
+  - NVIDIA Hopper (SM 89/90): H100, H200, L40S
+  - NVIDIA Blackwell (SM 100): B200
+  - AMD CDNA 3 (gfx942): MI300X, MI308X, MI325X
+NOT supported on:
+  - AMD RDNA 2 (gfx1030): RX 6700 XT, RX 6800, etc.
+  - AMD RDNA 3 (gfx1100): RX 7900 XTX, etc.
+  - NVIDIA Ampere (SM 80): A100 (has limited fp8 but not in _scaled_mm)
+
 FP8 dtype choice
 ================
 There are two FP8 formats. We use both, following the standard convention:
@@ -73,6 +84,21 @@ import torch
 import torch.nn as nn
 
 from nanochat.common import COMPUTE_DTYPE
+
+
+def fp8_supported() -> bool:
+    """Check if the current GPU has FP8 tensor core support for _scaled_mm."""
+    if not torch.cuda.is_available():
+        return False
+    major, minor = torch.cuda.get_device_capability()
+    # NVIDIA Hopper (SM 89/90), Blackwell (SM 100+)
+    if major >= 9:
+        return True
+    # AMD CDNA 3 (gfx942 — MI300X/MI325X) reports as (9, 2) via HIP
+    # AMD RDNA 2/3 (gfx1030/gfx1100) reports as (10, x) — NO FP8 tensor cores
+    if major >= 10:
+        return False
+    return False
 
 # Avoid division by zero when computing scale from an all-zeros tensor
 EPS = 1e-12
